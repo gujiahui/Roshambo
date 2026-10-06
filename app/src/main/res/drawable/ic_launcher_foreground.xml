@@ -1,0 +1,26 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Palm -->
+    <path
+        android:fillColor="#1A1A1A"
+        android:pathData="M40,72 L37,54 Q36,48 43,47 L65,47 Q72,48 71,54 L68,72 Z" />
+    <!-- Two fingers: scissors motif -->
+    <path
+        android:strokeColor="#1A1A1A"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M48,47 L48,32" />
+    <path
+        android:strokeColor="#1A1A1A"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M60,47 L60,32" />
+    <path
+        android:strokeColor="#FFD700"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M48,38 L60,42" />
+</vector>
