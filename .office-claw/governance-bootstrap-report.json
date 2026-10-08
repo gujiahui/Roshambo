@@ -1,0 +1,38 @@
+{
+  "projectPath": "D:\\jolowork\\qdd\\workspaces\\githubProjects\\Roshambo",
+  "timestamp": 1791439061330,
+  "packVersion": "2.0.0",
+  "actions": [
+    {
+      "file": "BACKLOG.md",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/SOP.md",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/features/.gitkeep",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/decisions/.gitkeep",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/discussions/.gitkeep",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/features/TEMPLATE.md",
+      "action": "skipped",
+      "reason": "file already exists"
+    }
+  ],
+  "dryRun": false
+}

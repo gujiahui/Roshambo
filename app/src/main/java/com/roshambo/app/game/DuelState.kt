@@ -30,7 +30,7 @@ enum class DuelMode(
     }
 }
 
-enum class RoundState { IDLE, SPINNING, RESOLVED }
+enum class RoundState { IDLE, COUNTDOWN, SHOOT, RESOLVED }
 
 enum class Outcome(val label: String) {
     WIN("你赢了"),
@@ -55,15 +55,31 @@ data class DuelState(
     /** Raw per-frame classification, drives the live hint. */
     val liveGesture: Gesture = Gesture.UNKNOWN,
     val phase: RoundState = RoundState.IDLE,
-    /** What the app is currently showing — spins in HEAD_TO_HEAD. */
+    /** Countdown number shown during COUNTDOWN (3/2/1); 0 once we reach SHOOT. */
+    val countdown: Int = 0,
+    /** What the app is currently showing — revealed together with the user at resolve. */
     val appGesture: Gesture = Gesture.UNKNOWN,
     val userGesture: Gesture = Gesture.UNKNOWN,
     val outcome: Outcome? = null,
-    val hint: String = "点击开始，摄像头识别你的出拳",
+    val hint: String = "点开始，准备石头剪刀布",
     val cameraReady: Boolean = false,
     val permissionGranted: Boolean = false,
+    val muted: Boolean = false,
 ) {
     val canStart: Boolean get() = phase == RoundState.IDLE
-    val spinning: Boolean get() = phase == RoundState.SPINNING
+    val shooting: Boolean get() = phase == RoundState.COUNTDOWN || phase == RoundState.SHOOT
     val totalRounds: Int get() = wins + losses + draws
+}
+
+/**
+ * One-shot cues emitted by the ViewModel for the UI to play as sound (or trigger
+ * UI effects). Kept as plain data so the VM stays free of Android audio deps.
+ */
+sealed interface DuelEvent {
+    data object Tap : DuelEvent
+    data object Tick : DuelEvent
+    data object Go : DuelEvent
+    data object Win : DuelEvent
+    data object Lose : DuelEvent
+    data object Draw : DuelEvent
 }

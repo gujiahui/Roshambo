@@ -11,3 +11,6 @@ captures/
 *.apk
 *.aab
 /.workbuddy
+
+# JiuwenSwarm runtime file operation logs
+.agent_history/

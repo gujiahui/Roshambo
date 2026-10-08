@@ -5,11 +5,13 @@ import androidx.lifecycle.viewModelScope
 import com.roshambo.app.gesture.Gesture
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.random.Random
 
@@ -18,29 +20,26 @@ class DuelViewModel : ViewModel() {
     private val _state = MutableStateFlow(DuelState())
     val state: StateFlow<DuelState> = _state.asStateFlow()
 
-    /** Exposed so the camera analyzer can hand gestures to the same stability filter. */
-    var onStableGesture: (Gesture) -> Unit = {}
-        private set
+    /** One-shot cues (sound / effects) for the UI to consume. */
+    private val _events = MutableSharedFlow<DuelEvent>(extraBufferCapacity = 16)
+    val events: SharedFlow<DuelEvent> = _events.asSharedFlow()
 
-    private var spinJob: Job? = null
-
-    fun bindGestureListener(listener: (Gesture) -> Unit) {
-        onStableGesture = listener
-    }
+    private var roundJob: Job? = null
 
     fun setMode(mode: DuelMode) {
         if (_state.value.mode == mode) return
-        stopSpin()
+        cancelRound()
         _state.update {
             it.copy(
                 mode = mode,
                 phase = RoundState.IDLE,
+                countdown = 0,
                 appGesture = Gesture.UNKNOWN,
                 userGesture = Gesture.UNKNOWN,
                 outcome = null,
                 hint = when (mode) {
-                    DuelMode.HEAD_TO_HEAD -> "点击开始，摄像头识别你的出拳"
-                    DuelMode.EASY_WIN -> "点击开始，识别后我会出你能赢的"
+                    DuelMode.HEAD_TO_HEAD -> "点开始，准备石头剪刀布"
+                    DuelMode.EASY_WIN -> "点开始，我保证让你赢"
                 },
             )
         }
@@ -50,80 +49,104 @@ class DuelViewModel : ViewModel() {
 
     fun setPermission(granted: Boolean) = _state.update { it.copy(permissionGranted = granted) }
 
+    fun setMuted(muted: Boolean) = _state.update { it.copy(muted = muted) }
+
     /** Live per-frame value for the on-screen hint. */
     fun reportLive(gesture: Gesture) = _state.update { it.copy(liveGesture = gesture) }
 
-    fun startRound() {
-        if (!_state.value.canStart) return
-        stopSpin()
-        when (_state.value.mode) {
-            DuelMode.HEAD_TO_HEAD -> startHeadToHead()
-            DuelMode.EASY_WIN -> startEasyWin()
-        }
-    }
+    /** UI calls this on any button press so taps feel responsive. */
+    fun tap() = _events.tryEmit(DuelEvent.Tap)
 
-    /** Random mode: the wheel spins until a stable gesture stops it, then the app rolls. */
-    private fun startHeadToHead() {
+    /**
+     * Begin a round: a 3-2-1 countdown with tick/Go cues, then open the shoot
+     * window. The user shows a hand; the app reveals its pick at the same moment.
+     */
+    fun startRound() {
+        if (_state.value.phase != RoundState.IDLE) return
+        cancelRound()
         _state.update {
             it.copy(
-                phase = RoundState.SPINNING,
-                userGesture = Gesture.UNKNOWN,
+                phase = RoundState.COUNTDOWN,
+                countdown = 3,
                 appGesture = Gesture.UNKNOWN,
+                userGesture = Gesture.UNKNOWN,
                 outcome = null,
-                hint = "出你的拳——石头、剪刀还是布？",
+                hint = "准备…",
             )
         }
-        spinJob = viewModelScope.launch {
-            val pool = listOf(Gesture.ROCK, Gesture.SCISSORS, Gesture.PAPER)
-            var i = 0
-            while (isActive) {
-                _state.update { it.copy(appGesture = pool[i % pool.size]) }
-                delay(110L)
-                i++
+        _events.tryEmit(DuelEvent.Tick)
+        roundJob = viewModelScope.launch {
+            delay(700); _state.update { it.copy(countdown = 2) }; _events.tryEmit(DuelEvent.Tick)
+            delay(700); _state.update { it.copy(countdown = 1) }; _events.tryEmit(DuelEvent.Tick)
+            delay(700)
+            _state.update { it.copy(phase = RoundState.SHOOT, countdown = 0, hint = "出拳！把手亮出来") }
+            _events.tryEmit(DuelEvent.Go)
+            // Shoot window — if nothing is shown in time, relax back to idle.
+            delay(SHOOT_WINDOW_MS)
+            if (_state.value.phase == RoundState.SHOOT) {
+                _state.update { it.copy(phase = RoundState.IDLE, hint = "没看清，点开始再来一次") }
             }
         }
     }
 
-    /** Must-lose mode: waits for a gesture, then plays the reply the user can beat. */
-    private fun startEasyWin() {
+    /** After a round resolves, immediately queue the next countdown. */
+    fun playAgain() {
+        if (_state.value.phase != RoundState.RESOLVED) return
+        cancelRound()
         _state.update {
             it.copy(
-                phase = RoundState.SPINNING,
-                userGesture = Gesture.UNKNOWN,
+                phase = RoundState.IDLE,
                 appGesture = Gesture.UNKNOWN,
+                userGesture = Gesture.UNKNOWN,
                 outcome = null,
-                hint = "出你的拳——我一定让你赢",
             )
         }
+        startRound()
     }
 
     /**
-     * Called by the camera pipeline once a gesture passes the stability filter.
-     * Returns true if the gesture was consumed by the current round.
+     * Called by the camera pipeline (or the manual fallback) once a gesture is
+     * accepted. Only honored during the shoot window.
      */
     fun onGestureAccepted(gesture: Gesture): Boolean {
         if (gesture == Gesture.UNKNOWN) return false
         val s = _state.value
-        if (s.phase != RoundState.SPINNING) return false
+        if (s.phase != RoundState.SHOOT) return false
 
-        return when (s.mode) {
-            DuelMode.HEAD_TO_HEAD -> {
-                stopSpin()
-                val app = pick(Random.nextInt(3))
-                resolve(gesture, app)
-                true
-            }
-            // Play whatever the user's move defeats, so the user always takes the round.
-            DuelMode.EASY_WIN -> {
-                stopSpin()
-                resolve(gesture, gesture.defeats())
-                true
-            }
+        cancelRound()
+        when (s.mode) {
+            // Both reveal at once: app rolls randomly.
+            DuelMode.HEAD_TO_HEAD -> resolve(gesture, pick(Random.nextInt(3)))
+            // App plays the move the user beats, so the user always wins.
+            DuelMode.EASY_WIN -> resolve(gesture, gesture.defeats())
         }
+        return true
     }
 
     /** Manual fallback used when the camera is unavailable or permission is denied. */
-    fun playManual(gesture: Gesture) = onGestureAccepted(gesture)
+    fun playManual(gesture: Gesture) {
+        if (_state.value.phase == RoundState.COUNTDOWN) return
+        if (_state.value.phase == RoundState.RESOLVED) {
+            _state.update {
+                it.copy(
+                    phase = RoundState.IDLE,
+                    appGesture = Gesture.UNKNOWN,
+                    userGesture = Gesture.UNKNOWN,
+                    outcome = null,
+                )
+            }
+        }
+        _state.update {
+            it.copy(
+                phase = RoundState.SHOOT,
+                appGesture = Gesture.UNKNOWN,
+                userGesture = Gesture.UNKNOWN,
+                outcome = null,
+                hint = "出拳！",
+            )
+        }
+        onGestureAccepted(gesture)
+    }
 
     private fun resolve(user: Gesture, app: Gesture) {
         val outcome = Outcome.of(user, app)
@@ -144,28 +167,18 @@ class DuelViewModel : ViewModel() {
                 },
             )
         }
+        _events.tryEmit(
+            when (outcome) {
+                Outcome.WIN -> DuelEvent.Win
+                Outcome.LOSE -> DuelEvent.Lose
+                Outcome.DRAW -> DuelEvent.Draw
+            }
+        )
     }
 
-    fun nextRound() {
-        stopSpin()
-        _state.update {
-            it.copy(
-                phase = RoundState.IDLE,
-                userGesture = Gesture.UNKNOWN,
-                appGesture = Gesture.UNKNOWN,
-                outcome = null,
-                hint = "点击开始下一局",
-            )
-        }
-    }
-
-    fun resetScore() {
-        _state.update { it.copy(wins = 0, losses = 0, draws = 0, round = 0) }
-    }
-
-    private fun stopSpin() {
-        spinJob?.cancel()
-        spinJob = null
+    private fun cancelRound() {
+        roundJob?.cancel()
+        roundJob = null
     }
 
     private fun pick(i: Int): Gesture = when (i) {
@@ -175,7 +188,12 @@ class DuelViewModel : ViewModel() {
     }
 
     override fun onCleared() {
-        stopSpin()
+        cancelRound()
         super.onCleared()
+    }
+
+    companion object {
+        /** How long the user has to show a hand after "出拳！" before we relax. */
+        const val SHOOT_WINDOW_MS = 3500L
     }
 }
