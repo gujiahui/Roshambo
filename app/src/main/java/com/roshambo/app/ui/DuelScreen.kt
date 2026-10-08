@@ -46,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
@@ -77,14 +78,12 @@ enum class SizeClass { COMPACT, MEDIUM, EXPANDED }
 
 @Composable
 fun rememberSizeClass(): SizeClass {
-    BoxWithConstraints {
-        val w = maxWidth
-        return remember(w) {
-            when {
-                w < 600.dp -> SizeClass.COMPACT
-                w < 840.dp -> SizeClass.MEDIUM
-                else -> SizeClass.EXPANDED
-            }
+    val w = LocalConfiguration.current.screenWidthDp.dp
+    return remember(w) {
+        when {
+            w < 600.dp -> SizeClass.COMPACT
+            w < 840.dp -> SizeClass.MEDIUM
+            else -> SizeClass.EXPANDED
         }
     }
 }
@@ -115,12 +114,12 @@ fun RoshamboApp(viewModel: DuelViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val sizeClass = rememberSizeClass()
 
+    val ctx = LocalContext.current
     val hasCamera = remember {
-        LocalContext.current.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+        ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
     }
     val permission = rememberCameraPermission { viewModel.setPermission(it) }
 
-    val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // One analyzer per composition, released with it.
@@ -132,6 +131,12 @@ fun RoshamboApp(viewModel: DuelViewModel) {
         )
     }
     DisposableEffect(Unit) { onDispose { analyzer.release() } }
+
+    // A new round starts with a fresh filter, so a gesture held from the previous
+    // round cannot resolve the new one instantly.
+    LaunchedEffect(state.phase) {
+        if (state.phase == RoundState.SPINNING) analyzer.resetFilter()
+    }
 
     BoxWithConstraints(
         Modifier.fillMaxSize().background(Canvas)
@@ -251,16 +256,16 @@ private fun CameraPane(
         if (enabled) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    PreviewView(ctx).apply {
+                factory = { viewCtx ->
+                    PreviewView(viewCtx).apply {
                         scaleType = PreviewView.ScaleType.FILL_CENTER
                         // COMPATIBLE avoids black-frame flicker that PERFORMANCE shows on some tablets.
                         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                        // Bind exactly once per view — rebinding on every recomposition
+                        // (liveGesture updates per frame) restarts the camera session nonstop.
+                        analyzer.bind(lifecycleOwner, this)
+                        onCameraReady(true)
                     }
-                },
-                update = { view ->
-                    analyzer.bind(lifecycleOwner, view)
-                    onCameraReady(true)
                 },
             )
         } else {
@@ -366,7 +371,7 @@ private fun ControlPane(
                     state.phase == RoundState.RESOLVED -> "再来一局"
                     else -> "开始"
                 },
-                style = androidx.compose.material3.typography.titleLarge,
+                style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
             )
         }
 

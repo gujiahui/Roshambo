@@ -1,15 +1,21 @@
 package com.roshambo.app.camera
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker.HandLandmarkerOptions
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.roshambo.app.gesture.Gesture
 import com.roshambo.app.gesture.GestureClassifier
@@ -53,7 +59,7 @@ class HandGestureAnalyzer(
                 provider = camProvider
 
                 val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = previewView.surfaceProvider
+                    it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
                 val analysis = ImageAnalysis.Builder()
@@ -75,14 +81,20 @@ class HandGestureAnalyzer(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    private fun analyze(imageProxy: androidx.camera.core.ImageProxy) {
+    private fun analyze(imageProxy: ImageProxy) {
         try {
             if (closed.get()) return
             val lm = landmarker ?: createLandmarker() ?: return
-            val bitmap = imageProxy.toBitmap()
 
-            // CameraX timestamps are already monotonic nanoseconds; never substitute wall clock.
-            val result: HandLandmarkerResult = lm.detectForVideo(bitmap, imageProxy.imageInfo.timestamp)
+            // Frames arrive in sensor orientation. Rotate upright first, otherwise the
+            // classifier's "tip above knuckle" test is wrong on portrait phones and
+            // nearly every hand reads as ROCK.
+            val bitmap = rotateUpright(imageProxy.toBitmap(), imageProxy.imageInfo.rotationDegrees)
+            val mpImage = BitmapImageBuilder(bitmap).build()
+
+            // CameraX timestamps are monotonic nanoseconds; MediaPipe VIDEO mode wants ms.
+            val result: HandLandmarkerResult =
+                lm.detectForVideo(mpImage, imageProxy.imageInfo.timestamp / 1_000_000)
             val first = result.landmarks().firstOrNull()
 
             val raw = if (first == null) Gesture.UNKNOWN
@@ -104,6 +116,12 @@ class HandGestureAnalyzer(
         null
     }
 
+    private fun rotateUpright(src: Bitmap, degrees: Int): Bitmap {
+        if (degrees == 0) return src
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+    }
+
     fun release() {
         if (closed.compareAndSet(false, true)) {
             runCatching { provider?.unbindAll() }
@@ -116,8 +134,8 @@ class HandGestureAnalyzer(
 
 private object HandLandmarkerOptionsHolder {
     fun build() =
-        com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerOptions.builder()
-            .setModelAssetPath("hand_landmarker.task")
+        HandLandmarkerOptions.builder()
+            .setBaseOptions(BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build())
             .setRunningMode(RunningMode.VIDEO)
             .setNumHands(1)
             .setMinHandDetectionConfidence(0.6f)
