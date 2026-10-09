@@ -10,6 +10,11 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -54,6 +60,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -138,16 +145,19 @@ fun RoshamboApp(viewModel: DuelViewModel) {
     }
     DisposableEffect(Unit) { onDispose { analyzer.release() } }
 
-    // A fresh filter whenever a round opens, so a held gesture cannot leak across.
+    // A fresh filter whenever a round opens, and pause detection outside the
+    // live/shoot windows so the camera pipeline is not running hot on the result screen.
     LaunchedEffect(state.phase) {
         if (state.shooting) analyzer.resetFilter()
+        analyzer.setActive(state.phase == RoundState.IDLE || state.phase == RoundState.SHOOT)
     }
 
-    // Sound: collect VM cues and play them through the SoundManager.
+    // Sound: collect VM cues and play them. The result cue now includes an
+    // embedded, offline Chinese voice line (no system TTS pack required).
     val sound = remember { SoundManager(ctx) }
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
-            sound.muted = state.muted
+            sound.muted = viewModel.state.value.muted
             sound.play(event)
         }
     }
@@ -174,7 +184,8 @@ fun RoshamboApp(viewModel: DuelViewModel) {
                     analyzer = analyzer,
                     lifecycleOwner = lifecycleOwner,
                     enabled = cameraAvailable,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(3f / 4f),
+                    modifier = Modifier.fillMaxWidth()
+                        .heightIn(min = 240.dp, max = 320.dp),
                     onCameraReady = { viewModel.setCameraReady(it) },
                 )
                 Spacer(Modifier.height(16.dp))
@@ -192,17 +203,17 @@ fun RoshamboApp(viewModel: DuelViewModel) {
                 Modifier.fillMaxSize().padding(28.dp),
                 verticalAlignment = Alignment.Top,
             ) {
-                Column(Modifier.weight(1.05f).fillMaxHeight()) {
-                    TopBar(state, viewModel)
-                    Spacer(Modifier.height(16.dp))
-                    DuelBoard(state, target)
-                    Spacer(Modifier.height(18.dp))
+                Column(
+                    Modifier.weight(1.05f).fillMaxHeight()
+                        .verticalScroll(rememberScrollState())
+                ) {
                     CameraPane(
                         state = state,
                         analyzer = analyzer,
                         lifecycleOwner = lifecycleOwner,
                         enabled = cameraAvailable,
-                        modifier = Modifier.fillMaxWidth().aspectRatio(3f / 4f),
+                        modifier = Modifier.fillMaxWidth()
+                            .heightIn(min = 220.dp, max = 620.dp),
                         onCameraReady = { viewModel.setCameraReady(it) },
                     )
                 }
@@ -210,6 +221,10 @@ fun RoshamboApp(viewModel: DuelViewModel) {
                 Column(
                     Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState())
                 ) {
+                    TopBar(state, viewModel)
+                    Spacer(Modifier.height(16.dp))
+                    DuelBoard(state, target, Modifier.zIndex(2f))
+                    Spacer(Modifier.height(18.dp))
                     ModeControl(state, viewModel, cameraAvailable)
                     Spacer(Modifier.height(18.dp))
                     ActionButton(state, viewModel)
@@ -219,6 +234,50 @@ fun RoshamboApp(viewModel: DuelViewModel) {
                     }
                     Spacer(Modifier.height(20.dp))
                 }
+            }
+        }
+        // Big result banner: animates in on resolve, synced with the speech cue.
+        ResultBanner(state)
+    }
+}
+
+@Composable
+private fun ResultBanner(state: DuelState) {
+    val (text, color) = when (state.outcome) {
+        Outcome.WIN -> "你赢了！" to WinGreen
+        Outcome.LOSE -> "你输了！" to LoseRed
+        Outcome.DRAW -> "平局" to DrawAmber
+        else -> "" to InkMuted
+    }
+    AnimatedVisibility(
+        visible = state.phase == RoundState.RESOLVED && text.isNotEmpty(),
+        enter = fadeIn(animationSpec = tween(220)) +
+            scaleIn(
+                animationSpec = tween(360, easing = FastOutSlowInEasing),
+                initialScale = 0.6f,
+            ),
+        exit = fadeOut(animationSpec = tween(140)),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(Color(0xDD1A1A1A))
+                    .padding(horizontal = 44.dp, vertical = 30.dp),
+            ) {
+                Text(
+                    text,
+                    style = MaterialTheme.typography.displayLarge,
+                    color = color,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "第 ${state.round + 1} 局",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color(0xFFEDE9E2),
+                )
             }
         }
     }
@@ -276,9 +335,9 @@ private fun ScoreItem(value: String, color: Color) {
 }
 
 @Composable
-private fun DuelBoard(state: DuelState, target: Dp) {
+private fun DuelBoard(state: DuelState, target: Dp, modifier: Modifier = Modifier) {
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(24.dp))
             .background(Surface)

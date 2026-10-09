@@ -3,6 +3,7 @@ package com.roshambo.app.camera
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -27,8 +28,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * CameraX preview + MediaPipe hand analysis, wired to a stability filter.
  *
- * Owns its own analysis executor. Every ImageProxy is closed in a finally block —
- * leaking frames stalls the preview within seconds.
+ * Long-run hardening (the original "freezes after a while" report):
+ * - Every ImageProxy is closed in a finally block — a leaked frame stalls preview.
+ * - Frames are throttled to ~15 fps so MediaPipe never accumulates load forever.
+ * - MediaPipe VIDEO mode needs a strictly increasing millisecond timestamp; we pass
+ *   the wall-clock ms directly instead of dividing the camera's nanosecond stamp
+ *   (which can collide to the same ms and make VIDEO mode reject frames).
+ * - Detection pauses outside the live/shoot windows (COUNTDOWN / RESOLVED), so the
+ *   pipeline is not running full-tilt while the user just looks at the result.
+ * - Input resolution is capped and per-frame bitmaps are recycled to bound memory.
  */
 class HandGestureAnalyzer(
     private val context: Context,
@@ -40,6 +48,8 @@ class HandGestureAnalyzer(
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val filter = GestureStabilityFilter()
     private val closed = AtomicBoolean(false)
+    private val active = AtomicBoolean(true)
+    private var lastAnalyzeMs = 0L
 
     private var landmarker: HandLandmarker? = null
     private var provider: ProcessCameraProvider? = null
@@ -50,6 +60,9 @@ class HandGestureAnalyzer(
 
     /** Fresh filter — call when a new round starts so a held gesture cannot leak across. */
     fun resetFilter() = filter.reset()
+
+    /** Pause/resume detection; call when the game phase changes. */
+    fun setActive(active: Boolean) = this.active.set(active)
 
     fun bind(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
         val future = ProcessCameraProvider.getInstance(context)
@@ -63,6 +76,7 @@ class HandGestureAnalyzer(
                 }
 
                 val analysis = ImageAnalysis.Builder()
+                    .setTargetResolution(Size(640, 480))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also { it.setAnalyzer(analysisExecutor, ::analyze) }
@@ -84,23 +98,35 @@ class HandGestureAnalyzer(
     private fun analyze(imageProxy: ImageProxy) {
         try {
             if (closed.get()) return
+            // Outside the live/shoot windows there is nothing to recognize — skip the
+            // expensive MediaPipe pass but still release the frame below.
+            if (!active.get()) return
+
+            val now = System.currentTimeMillis()
+            if (now - lastAnalyzeMs < MIN_INTERVAL_MS) return
+            lastAnalyzeMs = now
+
             val lm = landmarker ?: createLandmarker() ?: return
 
             // Frames arrive in sensor orientation. Rotate upright first, otherwise the
             // classifier's "tip above knuckle" test is wrong on portrait phones and
             // nearly every hand reads as ROCK.
-            val bitmap = rotateUpright(imageProxy.toBitmap(), imageProxy.imageInfo.rotationDegrees)
+            val src = imageProxy.toBitmap()
+            val degrees = imageProxy.imageInfo.rotationDegrees
+            val bitmap = if (degrees == 0) src else rotateUpright(src, degrees)
+            if (bitmap != src) src.recycle()
+
             val mpImage = BitmapImageBuilder(bitmap).build()
 
-            // CameraX timestamps are monotonic nanoseconds; MediaPipe VIDEO mode wants ms.
-            val result: HandLandmarkerResult =
-                lm.detectForVideo(mpImage, imageProxy.imageInfo.timestamp / 1_000_000)
-            val first = result.landmarks().firstOrNull()
+            // Wall-clock ms, strictly increasing frame to frame — correct for VIDEO mode.
+            val result: HandLandmarkerResult = lm.detectForVideo(mpImage, now)
+            if (bitmap != src) bitmap.recycle()
 
+            val first = result.landmarks().firstOrNull()
             val raw = if (first == null) Gesture.UNKNOWN
             else GestureClassifier.classify(first.map { p -> floatArrayOf(p.x(), p.y()) })
 
-            val stable = filter.offer(raw, System.currentTimeMillis())
+            val stable = filter.offer(raw, now)
             onLive(raw)
             if (stable != Gesture.UNKNOWN) onStable(stable)
         } catch (_: Throwable) {
@@ -117,7 +143,6 @@ class HandGestureAnalyzer(
     }
 
     private fun rotateUpright(src: Bitmap, degrees: Int): Bitmap {
-        if (degrees == 0) return src
         val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
         return Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
     }
@@ -129,6 +154,11 @@ class HandGestureAnalyzer(
             landmarker = null
             analysisExecutor.shutdown()
         }
+    }
+
+    companion object {
+        /** Minimum gap between detections (~15 fps) to keep MediaPipe from running hot. */
+        private const val MIN_INTERVAL_MS = 66L
     }
 }
 
