@@ -1,0 +1,7 @@
+﻿scan found 2 java procs
+PID 24412 [javaw.exe] gradle=False: "D:\Program Files\MyEclipse 2017 CI\\binary/com.sun.java.jdk8.win32.x86_64_1.8.0.v112/bin/javaw.exe" -Xms256m -Xmx1024m -XX:+UseG1GC -XX:+Us...
+PID 34572 [java.exe] gradle=True: "D:\Program Files\Java\openjdk-21.0.1\bin\java.exe" --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-U...
+  -> KILLED PID 34572
+after kill, java procs remaining: 
+  PID 24412 [javaw.exe]
+

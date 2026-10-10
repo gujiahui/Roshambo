@@ -1,0 +1,5 @@
+﻿Killed PID 11404 (gradle daemon)
+remaining java PID 24412 gradle=False: "D:\Program Files\MyEclipse 2017 CI\\binary/com.sun.java.jdk8.win32.x86_64_1.8.0.v112/bin/javaw.exe" -Xms256m -Xmx1024m 
+Remove failed: [safe-delete][SAFE_DELETE_FAIL_CLOSED] {"target":"D:\\joloDeploy\\gradle_repository\\caches\\journal-1","reason":"trash-failed","detail":"ERROR D:\\joloDeploy\\gradle_repository\\caches\\journal-1: Error during a `trash` operation: Unknown { description: \"Some operations were aborted\" }"}
+journal-1 exists after cleanup: False
+

@@ -1,0 +1,40 @@
+﻿=== journal-1 exists? ===
+journal-1: True
+=== journal-1 contents ===
+
+Name                    Length   Attrs
+----                    ------   -----
+file-access.bin        1227285 Archive
+file-access.properties      65 Archive
+journal-1.lock              37 Archive
+
+
+
+=== ACL of journal-1 ===
+
+           FileSystemRights AccessControlType IdentityReference                IsInherited                InheritanceFlags PropagationFlags
+           ---------------- ----------------- -----------------                -----------                ---------------- ----------------
+                FullControl             Allow BUILTIN\Administrators                  True                            None             None
+                  268435456             Allow BUILTIN\Administrators                  True ContainerInherit, ObjectInherit      InheritOnly
+                FullControl             Allow NT AUTHORITY\SYSTEM                     True                            None             None
+                  268435456             Allow NT AUTHORITY\SYSTEM                     True ContainerInherit, ObjectInherit      InheritOnly
+        Modify, Synchronize             Allow NT AUTHORITY\Authenticated Users        True                            None             None
+                 -536805376             Allow NT AUTHORITY\Authenticated Users        True ContainerInherit, ObjectInherit      InheritOnly
+ReadAndExecute, Synchronize             Allow BUILTIN\Users                           True                            None             None
+                -1610612736             Allow BUILTIN\Users                           True ContainerInherit, ObjectInherit      InheritOnly
+
+
+
+=== current user ===
+QDD-JOLOPLAY-PC\Administrator
+=== java/gradle procs ===
+
+   Id ProcessName
+   -- -----------
+  400 java       
+28708 java       
+33652 java       
+24412 javaw      
+
+
+

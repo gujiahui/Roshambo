@@ -1,0 +1,26 @@
+﻿=== all java/gradle/javaw procs with cmdline ===
+PID 24412 [javaw.exe]: "D:\Program Files\MyEclipse 2017 CI\\binary/com.sun.java.jdk8.win32.x86_64_1.8.0.v112/bin/javaw.exe" -Xms256m -Xmx1024m -XX:+UseG1GC -XX:+UseStringDeduplication -Dosgi.requiredJavaVersion=1.8 -Dosgi.n...
+PID 11404 [java.exe]: "D:\Program Files\Java\openjdk-21.0.1\bin\java.exe" --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-ope...
+=== journal-1 exists? True ===
+  file-access.bin  len=1227285  attrs=Archive
+  file-access.properties  len=65  attrs=Archive
+  journal-1.lock  len=39  attrs=Archive
+=== journal-1 ACL ===
+  BUILTIN\Administrators FullControl Allow
+  BUILTIN\Administrators 268435456 Allow
+  NT AUTHORITY\SYSTEM FullControl Allow
+  NT AUTHORITY\SYSTEM 268435456 Allow
+  NT AUTHORITY\Authenticated Users Modify, Synchronize Allow
+  NT AUTHORITY\Authenticated Users -536805376 Allow
+  BUILTIN\Users ReadAndExecute, Synchronize Allow
+  BUILTIN\Users -1610612736 Allow
+=== caches dir ACL (key entries) ===
+  BUILTIN\Administrators FullControl Allow
+  BUILTIN\Administrators 268435456 Allow
+  NT AUTHORITY\SYSTEM FullControl Allow
+  NT AUTHORITY\SYSTEM 268435456 Allow
+  NT AUTHORITY\Authenticated Users Modify, Synchronize Allow
+  NT AUTHORITY\Authenticated Users -536805376 Allow
+  BUILTIN\Users ReadAndExecute, Synchronize Allow
+  BUILTIN\Users -1610612736 Allow
+

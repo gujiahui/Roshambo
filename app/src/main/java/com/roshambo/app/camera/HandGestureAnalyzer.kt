@@ -3,8 +3,12 @@ package com.roshambo.app.camera
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.util.Size
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalUnsafeOptIn
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -23,124 +27,119 @@ import com.roshambo.app.gesture.GestureClassifier
 import com.roshambo.app.gesture.GestureStabilityFilter
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
-/**
- * CameraX preview + MediaPipe hand analysis, wired to a stability filter.
- *
- * Long-run hardening (the original "freezes after a while" report):
- * - Every ImageProxy is closed in a finally block — a leaked frame stalls preview.
- * - Frames are throttled to ~15 fps so MediaPipe never accumulates load forever.
- * - MediaPipe VIDEO mode needs a strictly increasing millisecond timestamp; we pass
- *   the wall-clock ms directly instead of dividing the camera's nanosecond stamp
- *   (which can collide to the same ms and make VIDEO mode reject frames).
- * - Detection pauses outside the live/shoot windows (COUNTDOWN / RESOLVED), so the
- *   pipeline is not running full-tilt while the user just looks at the result.
- * - Input resolution is capped and per-frame bitmaps are recycled to bound memory.
- */
 class HandGestureAnalyzer(
     private val context: Context,
-    /** Raw per-frame result, for the live on-screen hint. */
     private val onLive: (Gesture) -> Unit,
-    /** Fires only after the consecutive-frame and EMA gates both pass. */
     private val onStable: (Gesture) -> Unit,
+    private val onAnomaly: ((AnomalyType, String) -> Unit)? = null,
 ) {
-    private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private var analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val filter = GestureStabilityFilter()
     private val closed = AtomicBoolean(false)
     private val active = AtomicBoolean(true)
+    private val processing = AtomicBoolean(false)
     private var lastAnalyzeMs = 0L
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val consecutiveDrops = AtomicInteger(0)
+    private val lastFrameProcessedMs = AtomicLong(0L)
+    private val watchdogRunnable = object : Runnable {
+        override fun run() {
+            if (closed.get()) return
+            checkWatchdog()
+            mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
 
     private var landmarker: HandLandmarker? = null
     private var provider: ProcessCameraProvider? = null
+    private var previewView: PreviewView? = null
+    private var lifecycleOwner: LifecycleOwner? = null
 
-    fun interface Listener {
-        fun onFrame(gesture: Gesture)
-    }
-
-    /** Fresh filter — call when a new round starts so a held gesture cannot leak across. */
     fun resetFilter() = filter.reset()
-
-    /** Pause/resume detection; call when the game phase changes. */
     fun setActive(active: Boolean) = this.active.set(active)
 
     fun bind(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        this.lifecycleOwner = lifecycleOwner
+        this.previewView = previewView
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             try {
                 val camProvider = future.get()
                 provider = camProvider
-
+                if (landmarker == null) landmarker = createLandmarker()
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
-
                 val analysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(640, 480))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also { it.setAnalyzer(analysisExecutor, ::analyze) }
-
                 camProvider.unbindAll()
                 camProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_FRONT_CAMERA,
-                    preview,
-                    analysis,
+                    lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis,
                 )
-            } catch (t: Throwable) {
-                // A device without a usable front camera must not crash the app.
-                onLive(Gesture.UNKNOWN)
-            }
+                lastFrameProcessedMs.set(System.currentTimeMillis())
+                mainHandler.removeCallbacks(watchdogRunnable)
+                mainHandler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS)
+            } catch (e: Throwable) { Log.e(TAG, "bind failed", e) }
         }, ContextCompat.getMainExecutor(context))
     }
 
+    @OptIn(ExperimentalUnsafeOptIn::class)
     private fun analyze(imageProxy: ImageProxy) {
+        if (closed.get() || !active.get()) { imageProxy.close(); return }
+        if (!processing.compareAndSet(false, true)) { imageProxy.close(); trackDroppedFrame(); return }
         try {
-            if (closed.get()) return
-            // Outside the live/shoot windows there is nothing to recognize — skip the
-            // expensive MediaPipe pass but still release the frame below.
             if (!active.get()) return
-
             val now = System.currentTimeMillis()
             if (now - lastAnalyzeMs < MIN_INTERVAL_MS) return
             lastAnalyzeMs = now
-
-            val lm = landmarker ?: createLandmarker() ?: return
-
-            // Frames arrive in sensor orientation. Rotate upright first, otherwise the
-            // classifier's "tip above knuckle" test is wrong on portrait phones and
-            // nearly every hand reads as ROCK.
+            val lm = landmarker ?: return
             val src = imageProxy.toBitmap()
             val degrees = imageProxy.imageInfo.rotationDegrees
             val bitmap = if (degrees == 0) src else rotateUpright(src, degrees)
-            if (bitmap != src) src.recycle()
+            val result = lm.detectForVideo(BitmapImageBuilder(bitmap).build(), now)
+            lastFrameProcessedMs.set(System.currentTimeMillis())
+            consecutiveDrops.set(0)
+            val gesture = GestureClassifier.classify(result)
+            filter.onGesture(gesture)?.let { stable -> mainHandler.post { onStable(stable) } }
+            mainHandler.post { onLive(gesture) }
+            if (degrees != 0) bitmap.recycle()
+        } catch (e: Throwable) { Log.w(TAG, "analyze failed", e) }
+        finally { processing.set(false); imageProxy.close() }
+    }
 
-            val mpImage = BitmapImageBuilder(bitmap).build()
-
-            // Wall-clock ms, strictly increasing frame to frame — correct for VIDEO mode.
-            val result: HandLandmarkerResult = lm.detectForVideo(mpImage, now)
-            if (bitmap != src) bitmap.recycle()
-
-            val first = result.landmarks().firstOrNull()
-            val raw = if (first == null) Gesture.UNKNOWN
-            else GestureClassifier.classify(first.map { p -> floatArrayOf(p.x(), p.y()) })
-
-            val stable = filter.offer(raw, now)
-            onLive(raw)
-            if (stable != Gesture.UNKNOWN) onStable(stable)
-        } catch (_: Throwable) {
-            // Drop the frame rather than tearing down the camera.
-        } finally {
-            imageProxy.close()
+    private fun trackDroppedFrame() {
+        val drops = consecutiveDrops.incrementAndGet()
+        if (drops >= MAX_CONSECUTIVE_DROPS) {
+            consecutiveDrops.set(0)
+            reportAnomaly(AnomalyType.FRAME_DROP_STORM, "Too many consecutive frame drops")
         }
+    }
+
+    private fun checkWatchdog() {
+        if (closed.get() || !active.get()) return
+        val elapsed = System.currentTimeMillis() - lastFrameProcessedMs.get()
+        if (elapsed > WATCHDOG_TIMEOUT_MS) {
+            reportAnomaly(AnomalyType.WATCHDOG_TIMEOUT, "No frame processed for ${elapsed}ms")
+        }
+    }
+
+    private fun reportAnomaly(type: AnomalyType, message: String) {
+        Log.w(TAG, "Anomaly detected: $type - $message")
+        mainHandler.post { onAnomaly?.invoke(type, message) }
     }
 
     private fun createLandmarker(): HandLandmarker? = try {
         HandLandmarker.createFromOptions(context, HandLandmarkerOptionsHolder.build())
-    } catch (_: Throwable) {
-        null
-    }
+    } catch (_: Throwable) { null }
 
     private fun rotateUpright(src: Bitmap, degrees: Int): Bitmap {
         val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
@@ -149,27 +148,48 @@ class HandGestureAnalyzer(
 
     fun release() {
         if (closed.compareAndSet(false, true)) {
+            mainHandler.removeCallbacks(watchdogRunnable)
+            active.set(false)
             runCatching { provider?.unbindAll() }
             runCatching { landmarker?.close() }
             landmarker = null
             analysisExecutor.shutdown()
+            try {
+                if (!analysisExecutor.awaitTermination(2, TimeUnit.SECONDS)) analysisExecutor.shutdownNow()
+            } catch (e: InterruptedException) { analysisExecutor.shutdownNow(); Thread.currentThread().interrupt() }
         }
     }
 
+    fun rebind(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        if (!closed.get()) return
+        closed.set(false); active.set(true); processing.set(false)
+        lastAnalyzeMs = 0L; consecutiveDrops.set(0)
+        lastFrameProcessedMs.set(System.currentTimeMillis())
+        analysisExecutor.shutdown()
+        analysisExecutor = Executors.newSingleThreadExecutor()
+        mainHandler.removeCallbacks(watchdogRunnable)
+        mainHandler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS)
+        bind(lifecycleOwner, previewView)
+    }
+
     companion object {
-        /** Minimum gap between detections (~15 fps) to keep MediaPipe from running hot. */
+        private const val TAG = "HandGestureAnalyzer"
         private const val MIN_INTERVAL_MS = 66L
+        private const val WATCHDOG_INTERVAL_MS = 2000L
+        private const val WATCHDOG_TIMEOUT_MS = 5000L
+        private const val MAX_CONSECUTIVE_DROPS = 30
     }
 }
 
+enum class AnomalyType { FRAME_DROP_STORM, WATCHDOG_TIMEOUT }
+
 private object HandLandmarkerOptionsHolder {
-    fun build() =
-        HandLandmarkerOptions.builder()
-            .setBaseOptions(BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build())
-            .setRunningMode(RunningMode.VIDEO)
-            .setNumHands(1)
-            .setMinHandDetectionConfidence(0.6f)
-            .setMinHandPresenceConfidence(0.5f)
-            .setMinTrackingConfidence(0.5f)
-            .build()
+    fun build() = HandLandmarkerOptions.builder()
+        .setBaseOptions(BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build())
+        .setRunningMode(RunningMode.VIDEO)
+        .setNumHands(1)
+        .setMinHandDetectionConfidence(0.6f)
+        .setMinHandPresenceConfidence(0.5f)
+        .setMinTrackingConfidence(0.5f)
+        .build()
 }

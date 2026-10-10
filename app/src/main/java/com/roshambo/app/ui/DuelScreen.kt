@@ -136,14 +136,31 @@ fun RoshamboApp(viewModel: DuelViewModel) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraAvailable = permission && hasCamera
 
+    // Track camera restart requests — incremented when an anomaly triggers a rebind
+    var cameraRestartKey by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val previewViewRef = remember { mutableStateOf<PreviewView?>(null) }
+
     val analyzer = remember {
         HandGestureAnalyzer(
             context = ctx,
             onLive = { viewModel.reportLive(it) },
             onStable = { viewModel.onGestureAccepted(it) },
+            onAnomaly = { type, message ->
+                android.util.Log.w("DuelScreen", "Anomaly: $type - $message, restarting camera")
+                cameraRestartKey++
+            },
         )
     }
     DisposableEffect(Unit) { onDispose { analyzer.release() } }
+
+    // Auto-recovery: when cameraRestartKey changes, unbind and rebind the analyzer
+    LaunchedEffect(cameraRestartKey) {
+        if (cameraRestartKey > 0 && cameraAvailable) {
+            val pv = previewViewRef.value
+            if (pv != null) analyzer.rebind(lifecycleOwner, pv)
+        }
+    }
+    }
 
     // A fresh filter whenever a round opens, and pause detection outside the
     // live/shoot windows so the camera pipeline is not running hot on the result screen.
@@ -183,7 +200,9 @@ fun RoshamboApp(viewModel: DuelViewModel) {
                     state = state,
                     analyzer = analyzer,
                     lifecycleOwner = lifecycleOwner,
+                    cameraRestartKey = cameraRestartKey,
                     enabled = cameraAvailable,
+                    previewViewRef = previewViewRef,
                     modifier = Modifier.fillMaxWidth()
                         .heightIn(min = 240.dp, max = 320.dp),
                     onCameraReady = { viewModel.setCameraReady(it) },
@@ -211,7 +230,9 @@ fun RoshamboApp(viewModel: DuelViewModel) {
                         state = state,
                         analyzer = analyzer,
                         lifecycleOwner = lifecycleOwner,
+                        cameraRestartKey = cameraRestartKey,
                         enabled = cameraAvailable,
+                        previewViewRef = previewViewRef,
                         modifier = Modifier.fillMaxWidth()
                             .heightIn(min = 220.dp, max = 620.dp),
                         onCameraReady = { viewModel.setCameraReady(it) },
@@ -407,7 +428,9 @@ private fun CameraPane(
     state: DuelState,
     analyzer: HandGestureAnalyzer,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    cameraRestartKey: Int,
     enabled: Boolean,
+    previewViewRef: MutableState<PreviewView?>,
     modifier: Modifier,
     onCameraReady: (Boolean) -> Unit,
 ) {
@@ -419,6 +442,7 @@ private fun CameraPane(
         if (enabled) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
+                key = cameraRestartKey,
                 factory = { viewCtx ->
                     PreviewView(viewCtx).apply {
                         scaleType = PreviewView.ScaleType.FILL_CENTER
@@ -427,6 +451,7 @@ private fun CameraPane(
                         // (liveGesture updates per frame) restarts the camera nonstop.
                         analyzer.bind(lifecycleOwner, this)
                         onCameraReady(true)
+                        previewViewRef.value = this
                     }
                 },
             )
